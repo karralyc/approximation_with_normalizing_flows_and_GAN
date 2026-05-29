@@ -13,9 +13,7 @@ from tqdm import trange
 from metrics import Metrics
 from datasets import TwoDDatasets
 
-# ============================================================
-# Seed fixing
-# ============================================================
+
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -25,35 +23,6 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--seed', type=int, default=42, help='Random seed')
-args = parser.parse_args()
-
-
-# ============================================================
-# Settings
-# ============================================================
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-output_dir = 'outputs/realnvp_outputs'
-os.makedirs(output_dir, exist_ok=True)
-
-datasets_names = ['two_moons', 'gaussian_mixture', 'concentric_circles']
-
-configs = [
-    dict(n_layers=4, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=200),
-    dict(n_layers=6, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=200),
-    dict(n_layers=6, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=200),
-    dict(n_layers=6, hidden_dim=128, use_batchnorm=False, lr=1e-3, n_epochs=200),
-    dict(n_layers=6, hidden_dim=128, use_batchnorm=False, lr=1e-3, n_epochs=200),
-    dict(n_layers=6, hidden_dim=128, use_batchnorm=True, lr=5e-4, n_epochs=200),
-]
-
-batch_size = 256
-latent_dim = 2
-
-# ============================================================
-# RealNVP building blocks
-# ============================================================
 class MLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim, use_batchnorm=False):
         super().__init__()
@@ -105,7 +74,7 @@ class RealNVP(nn.Module):
         for i in range(n_layers):
             mask = torch.tensor([i % 2, (i + 1) % 2], dtype=torch.float32)
             self.layers.append(
-                CouplingLayer(dim, mask.to(device), hidden_dim, use_batchnorm)
+                CouplingLayer(dim, mask, hidden_dim, use_batchnorm)
             )
 
     def forward(self, x):
@@ -123,12 +92,9 @@ class RealNVP(nn.Module):
         return z, log_det
 
 
-# ============================================================
-# Mode coverage
-# ============================================================
 def compute_mode_coverage(dataset_name, real, gen, r=0.3):
     if dataset_name == 'gaussian_mixture':
-        angles = np.linspace(0, 2*np.pi, 8, endpoint=False)
+        angles = np.linspace(0, 2 * np.pi, 8, endpoint=False)
         centers = np.stack([np.cos(angles), np.sin(angles)], axis=1)
     elif dataset_name == 'two_moons':
         centers = np.array([[0, 0.5], [0, -0.5]])
@@ -137,6 +103,7 @@ def compute_mode_coverage(dataset_name, real, gen, r=0.3):
     else:
         return 0.0
 
+    gen = gen if isinstance(gen, np.ndarray) else gen.cpu().numpy()
     covered = 0
     for c in centers:
         if np.any(np.linalg.norm(gen - c, axis=1) < r):
@@ -144,91 +111,109 @@ def compute_mode_coverage(dataset_name, real, gen, r=0.3):
     return covered / len(centers)
 
 
-# ============================================================
-# Training
-# ============================================================
-datasets = TwoDDatasets(n_samples=10000).create_all_datasets()
-metrics = Metrics(device=device)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    args = parser.parse_args()
 
-for dataset_id, dataset_name in enumerate(datasets_names):
-    for cfg_id, cfg in enumerate(configs):
+    set_seed(args.seed)
 
-        # уникальный seed для каждой комбинации
-        set_seed(args.seed)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    output_dir = 'outputs/realnvp_outputs'
+    os.makedirs(output_dir, exist_ok=True)
 
-        print(f"\n=== RealNVP | {dataset_name} | cfg {cfg_id+1} | seed {args.seed} ===")
+    datasets_names = ['two_moons', 'gaussian_mixture', 'concentric_circles']
 
-        data = datasets[dataset_name]['data'].to(device)
+    configs = [
+        dict(n_layers=4, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=150),
+        dict(n_layers=6, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=150),
+        dict(n_layers=6, hidden_dim=64, use_batchnorm=False, lr=1e-3, n_epochs=150),
+        dict(n_layers=6, hidden_dim=128, use_batchnorm=False, lr=1e-3, n_epochs=150),
+        dict(n_layers=6, hidden_dim=128, use_batchnorm=False, lr=1e-3, n_epochs=150),
+        dict(n_layers=6, hidden_dim=128, use_batchnorm=True, lr=5e-4, n_epochs=150),
+    ]
 
-        model = RealNVP(
-            dim=2,
-            n_layers=cfg['n_layers'],
-            hidden_dim=cfg['hidden_dim'],
-            use_batchnorm=cfg['use_batchnorm']
-        ).to(device)
+    batch_size = 256
+    latent_dim = 2
 
-        optimizer = optim.Adam(model.parameters(), lr=cfg['lr'])
-        metrics_history = []
+    datasets = TwoDDatasets(n_samples=10000, random_state=args.seed).create_all_datasets()
+    metrics = Metrics(device=device)
 
-        start_time = time.time()
+    for dataset_id, dataset_name in enumerate(datasets_names):
+        for cfg_id, cfg in enumerate(configs):
+            print(f"\n=== RealNVP | {dataset_name} | cfg {cfg_id + 1} | seed {args.seed} ===")
 
-        for epoch in trange(1, cfg['n_epochs'] + 1):
-            perm = torch.randperm(data.size(0))
-            for i in range(0, data.size(0), batch_size):
-                batch = data[perm[i:i+batch_size]]
-                if batch.size(0) < batch_size:
-                    continue
+            data = datasets[dataset_name]['data'].to(device)
 
-                z, log_det = model(batch)
-                log_prob = -0.5 * (z ** 2).sum(dim=1)
-                loss = -(log_prob + log_det).mean()
+            model = RealNVP(
+                dim=2,
+                n_layers=cfg['n_layers'],
+                hidden_dim=cfg['hidden_dim'],
+                use_batchnorm=cfg['use_batchnorm']
+            ).to(device)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            optimizer = optim.Adam(model.parameters(), lr=cfg['lr'])
+            metrics_history = []
 
-            if epoch % 50 == 0 or epoch == 1:
-                with torch.no_grad():
-                    z = torch.randn(1000, 2, device=device)
-                    samples, _ = model.inverse(z)
-                    samples = samples.cpu().numpy()
+            start_time = time.time()
 
-                real_np = data[:1000].cpu().numpy()
+            for epoch in trange(1, cfg['n_epochs'] + 1):
+                perm = torch.randperm(data.size(0))
+                for i in range(0, data.size(0), batch_size):
+                    batch = data[perm[i:i + batch_size]]
+                    if batch.size(0) < batch_size:
+                        continue
 
-                metric_vals = metrics.compute_all_metrics(
-                    real_np, samples, true_distribution=dataset_name
-                )
-                metric_vals['epoch'] = epoch
-                metric_vals['mode_coverage'] = compute_mode_coverage(
-                    dataset_name, real_np, samples
-                )
+                    z, log_det = model(batch)
+                    log_prob = -0.5 * (z ** 2).sum(dim=1)
+                    loss = -(log_prob + log_det).mean()
 
-                metrics_history.append(metric_vals)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
-                plt.figure(figsize=(5,5))
-                plt.scatter(real_np[:,0], real_np[:,1], alpha=0.3, label='Real')
-                plt.scatter(samples[:,0], samples[:,1], alpha=0.5, label='Generated')
-                plt.legend()
-                plt.title(f"{dataset_name} | cfg {cfg_id+1} | epoch {epoch}")
-                plt.savefig(f"{output_dir}/{dataset_name}_cfg{cfg_id+1}_epoch{epoch}.png")
-                plt.close()
+                if epoch % 50 == 0 or epoch == 1:
+                    with torch.no_grad():
+                        z = torch.randn(1000, 2, device=device)
+                        samples, _ = model.inverse(z)
+                        samples = samples.cpu().numpy()
 
-        total_time = time.time() - start_time
+                    real_np = data[:1000].cpu().numpy()
 
-        df = pd.DataFrame(metrics_history)
-        df['dataset'] = dataset_name
-        df['config_id'] = cfg_id + 1
-        df['seed'] = args.seed
-        df['n_layers'] = cfg['n_layers']
-        df['hidden_dim'] = cfg['hidden_dim']
-        df['use_batchnorm'] = cfg['use_batchnorm']
-        df['total_training_time'] = total_time
+                    metric_vals = metrics.compute_all_metrics(
+                        real_np, samples, true_distribution=dataset_name
+                    )
+                    metric_vals['epoch'] = epoch
+                    metric_vals['mode_coverage'] = compute_mode_coverage(
+                        dataset_name, real_np, samples
+                    )
 
-        df.to_csv(
-            f"{output_dir}/metrics_{dataset_name}_cfg{cfg_id+1}.csv",
-            index=False
-        )
+                    metrics_history.append(metric_vals)
 
-        print(f"Finished in {total_time:.2f}s")
+                    plt.figure(figsize=(5, 5))
+                    plt.scatter(real_np[:, 0], real_np[:, 1], alpha=0.3, label='Real')
+                    plt.scatter(samples[:, 0], samples[:, 1], alpha=0.5, label='Generated')
+                    plt.legend()
+                    plt.title(f"{dataset_name} | cfg {cfg_id + 1} | epoch {epoch}")
+                    plt.savefig(f"{output_dir}/{dataset_name}_cfg{cfg_id + 1}_epoch{epoch}.png")
+                    plt.close()
 
-print("\nAll RealNVP experiments finished")
+            total_time = time.time() - start_time
+
+            df = pd.DataFrame(metrics_history)
+            df['dataset'] = dataset_name
+            df['config_id'] = cfg_id + 1
+            df['seed'] = args.seed
+            df['n_layers'] = cfg['n_layers']
+            df['hidden_dim'] = cfg['hidden_dim']
+            df['use_batchnorm'] = cfg['use_batchnorm']
+            df['total_training_time'] = total_time
+
+            df.to_csv(
+                f"{output_dir}/metrics_{dataset_name}_cfg{cfg_id + 1}.csv",
+                index=False
+            )
+
+            print(f"Finished in {total_time:.2f}s")
+
+    print("\nAll RealNVP experiments finished")
