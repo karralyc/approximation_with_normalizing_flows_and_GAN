@@ -6,8 +6,9 @@ SEED = 42
 
 os.makedirs('outputs/realnvp_outputs', exist_ok=True)
 os.makedirs('outputs/wgan_outputs', exist_ok=True)
+os.makedirs('outputs/experiment', exist_ok=True)
 
-scripts = ['real_nvp.py', 'wgan_gp.py']
+scripts = ['real_nvp.py', 'wgan_gp.py', 'exp.py']
 
 for script in scripts:
     subprocess.run([sys.executable, script, '--seed', str(SEED)])
